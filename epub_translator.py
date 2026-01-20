@@ -12,270 +12,259 @@ import logging
 from tqdm import tqdm
 
 # 配置日志
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
+
 class EPUBTranslator:
-    def __init__(self, api_url="http://localhost:5001/v1/chat/completions", target_language="zh"):
+    def __init__(
+        self,
+        api_url="http://localhost:5001/v1/chat/completions",
+        target_language="zh",
+        use_context=True,
+    ):
         """
-        初始化EPUB翻译器
-        
-        :param api_url: 本地OpenAI API接口地址
-        :param target_language: 目标翻译语言
+        初始化EPUB翻译器（支持上下文感知）
+        :param use_context: 是否在翻译时附加上下文（前一段原文+译文）
         """
         self.api_url = api_url
         self.target_language = target_language
+        self.use_context = use_context  # ← 新增参数
         self.session = requests.Session()
-        
-        # 设置请求头
-        self.session.headers.update({
-            'Content-Type': 'application/json',
-            'User-Agent': 'EPUBTranslator/1.0'
-        })
+        self.session.headers.update(
+            {"Content-Type": "application/json", "User-Agent": "EPUBTranslator/1.0"}
+        )
+        self.last_original = None
+        self.last_translation = None
 
     def clean_think_tags(self, text):
-        """
-        清理<think>标签及其内容
-        
-        :param text: 原始文本
-        :return: 清理后的文本
-        """
-        # 使用正则表达式移除<think>标签及其内容
-        pattern = r'<think>.*?</think>'
-        cleaned_text = re.sub(pattern, '', text, flags=re.DOTALL)
-        return cleaned_text.strip()
+        """清理<think>标签"""
+        pattern = r"\<think\>.*?\<\/think\>"
+        return re.sub(pattern, "", text, flags=re.DOTALL).strip()
 
     def translate_text(self, text):
-        """
-        调用本地API翻译文本
-        
-        :param text: 待翻译文本
-        :return: 翻译后的文本
-        """
+        """调用API翻译，可选附加上下文"""
         if not text.strip():
             return ""
-            
-        # 构建API请求数据
+
+        messages = [
+            {
+                "role": "system",
+                "content": f"你是资深文学翻译专家，要求保留原文的文学美感和情感基调，使用优美流畅的中文表达，直接输出译文。",
+            }
+        ]
+
+        # 👇 仅当启用上下文且存在缓存时才添加
+        if self.use_context and self.last_original and self.last_translation:
+            messages.extend(
+                [
+                    {"role": "user", "content": self.last_original},
+                    {"role": "assistant", "content": self.last_translation},
+                ]
+            )
+
+        messages.append(
+            {
+                "role": "user",
+                "content": f"请将以下英文段落完整翻译为中文，**不得保留任何英文单词**，所有内容必须译为地道中文：\n{text}/no_think",
+            }
+        )
+
         payload = {
-            "model": "gpt-3.5-turbo",
-            "messages": [
-                {
-                    "role": "system",
-                    "content": f"你是一个专业的翻译助手，请将以下文本翻译成{self.target_language}。"
-                },
-                {
-                    "role": "user",
-                    "content": text
-                }
-            ],
-            "temperature": 0.3,
-            "max_tokens": 1000
+            "model": "Qwen3-14B",
+            "messages": messages,
+            "temperature": 0.7,
+            "max_tokens": 1000,
+            "top_p": 0.8,
+            "top_k": 20,
+            "min_p": 0.0,
         }
 
         try:
             response = self.session.post(self.api_url, json=payload, timeout=60)
             response.raise_for_status()
-            
-            result = response.json()
-            translated_text = result['choices'][0]['message']['content']
-            
-            # 清理<think>标签
+            translated_text = response.json()["choices"][0]["message"]["content"]
             cleaned_text = self.clean_think_tags(translated_text)
-            
-            logger.info(f"成功翻译文本片段")
+
+            # 更新上下文缓存（即使不用上下文也更新，便于调试；也可改为仅在 use_context 时更新）
+            self.last_original = text
+            self.last_translation = cleaned_text
             return cleaned_text
-            
-        except requests.exceptions.RequestException as e:
-            logger.error(f"API请求失败: {e}")
-            raise
-        except KeyError as e:
-            logger.error(f"解析API响应失败: {e}, 响应内容: {response.text}")
-            raise
+
         except Exception as e:
-            logger.error(f"翻译过程出错: {e}")
+            logger.error(f"翻译失败: {e}")
             raise
 
     def get_all_paragraphs(self, soup):
-        """
-        获取所有需要翻译的段落
-        
-        :param soup: BeautifulSoup对象
-        :return: 段落列表
-        """
-        paragraphs = soup.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
-        # 过滤掉空段落
-        valid_paragraphs = []
-        for p in paragraphs:
-            if p.get_text().strip():
-                valid_paragraphs.append(p)
-        return valid_paragraphs
+        """提取所有非空段落"""
+        tags = ["p", "h1", "h2", "h3", "h4", "h5", "h6"]
+        paragraphs = soup.find_all(tags)
+        return [p for p in paragraphs if p.get_text().strip()]
 
     def process_paragraphs(self, soup, total_paragraphs):
-        """
-        处理HTML段落，逐段翻译并插入译文
-        
-        :param soup: BeautifulSoup对象
-        :param total_paragraphs: 总段落数量
-        :return: 更新后的BeautifulSoup对象
-        """
+        """处理段落并翻译（始终返回soup）"""
+        # 【可选】每章重置上下文：取消下一行注释
+        # self.last_original = self.last_translation = None
+
         paragraphs = self.get_all_paragraphs(soup)
-        
         logger.info(f"当前章节找到 {len(paragraphs)} 个段落需要翻译")
-        
-        # 使用tqdm显示进度条
-        for i, p in enumerate(tqdm(paragraphs, desc="翻译进度", unit="段")):
+
+        if not paragraphs:
+            return soup  # ⚠️ 关键：即使无段落也返回原soup
+
+        for p in tqdm(paragraphs, desc="翻译进度", unit="段"):
             original_text = p.get_text().strip()
-            
-            # 如果段落为空或只有空白字符，则跳过
             if not original_text:
                 continue
-                
-            current_index = getattr(self, 'current_index', 0)
-            setattr(self, 'current_index', current_index + 1)
-            current_pos = getattr(self, 'current_index')
-            
-            logger.info(f"正在翻译第({current_pos}/{total_paragraphs})段")
-            
+
+            current_index = getattr(self, "current_index", 0) + 1
+            setattr(self, "current_index", current_index)
+
             try:
-                # 翻译文本
                 translated_text = self.translate_text(original_text)
-                
-                # 打印原文和译文
-                print(f"\n--- 第({current_pos}/{total_paragraphs})段 ---")
+
+                print(f"\n--- 第({current_index}/{total_paragraphs})段 ---")
                 print(f"原文: {original_text}")
                 print(f"译文: {translated_text}")
                 print("-" * 70)
-                
-                # 创建新的段落元素用于存放翻译内容
-                translation_p = soup.new_tag('p', **{'class': 'translation'})
-                translation_p.string = translated_text
-                
-                # 在原文后插入译文
-                p.insert_after(translation_p)
-                
-                # 添加一些样式以便区分原文和译文
-                if p.get('class'):
-                    p['class'] = p.get('class') + ['original']
-                else:
-                    p['class'] = ['original']
-                    
-                # 添加延时以避免API调用过于频繁
+
+                # 插入译文
+                trans_tag = soup.new_tag("p", **{"class": "translation"})
+                trans_tag.string = translated_text
+                p.insert_after(trans_tag)
+
+                # 标记原文
+                classes = p.get("class", []) + ["original"]
+                p["class"] = classes
+
                 time.sleep(1)
-                
+
             except Exception as e:
-                logger.error(f"翻译第({current_pos}/{total_paragraphs})段时出错: {e}")
-                print(f"错误: 翻译第({current_pos}/{total_paragraphs})段时出错 - {e}")
+                logger.error(f"跳过段落（错误: {e}）")
                 continue
-        
-        return soup
+
+        return soup  # ✅ 确保始终返回soup
 
     def count_total_paragraphs(self, book):
-        """
-        统计整个EPUB中所有需要翻译的段落数量
-        
-        :param book: EPUB书籍对象
-        :return: 总段落数
-        """
-        total_count = 0
+        """统计全文段落数"""
+        total = 0
         for item in book.get_items():
             if item.get_type() == ebooklib.ITEM_DOCUMENT:
-                soup = BeautifulSoup(item.get_content(), 'html.parser')
-                paragraphs = self.get_all_paragraphs(soup)
-                total_count += len(paragraphs)
-        return total_count
+                content = item.get_content()
+                if content:
+                    soup = BeautifulSoup(content, "html.parser")
+                    total += len(self.get_all_paragraphs(soup))
+        return total
 
     def translate_epub(self, input_path, output_path):
-        """
-        主函数：翻译整个EPUB文件
-        
-        :param input_path: 输入EPUB文件路径
-        :param output_path: 输出EPUB文件路径
-        """
-        logger.info(f"开始处理EPUB文件: {input_path}")
-        
-        # 读取EPUB文件
+        """主翻译流程"""
+        logger.info(f"开始处理EPUB: {input_path}")
         book = epub.read_epub(input_path)
-        
-        # 统计总段落数
         total_paragraphs = self.count_total_paragraphs(book)
-        logger.info(f"总共找到 {total_paragraphs} 个需要翻译的段落")
-        
-        # 重置全局索引
+        logger.info(f"共需翻译 {total_paragraphs} 段")
         self.current_index = 0
-        
-        # 遍历所有文档项
+
         for item in book.get_items():
-            if item.get_type() == ebooklib.ITEM_DOCUMENT:
-                # 解析HTML内容
-                soup = BeautifulSoup(item.get_content(), 'html.parser')
-                
-                # 处理段落并翻译
-                updated_soup = self.process_paragraphs(soup, total_paragraphs)
-                
-                # 更新项目内容
-                item.set_content(str(updated_soup).encode('utf-8'))
-        
-        # 设置CSS样式
-        css_content = '''
-        .original {
-            font-weight: bold;
-            margin-bottom: 0.5em;
-        }
+            if item.get_type() != ebooklib.ITEM_DOCUMENT:
+                continue
+
+            content = item.get_content()
+            if not content:
+                logger.debug(f"跳过空内容项: {item.file_name}")
+                continue
+
+            try:
+                soup = BeautifulSoup(content, "html.parser")
+            except Exception as e:
+                logger.warning(f"解析失败，跳过 {item.file_name}: {e}")
+                continue
+
+            updated_soup = self.process_paragraphs(soup, total_paragraphs)
+            if updated_soup is None:
+                logger.error(f"意外：process_paragraphs 返回 None ({item.file_name})")
+                continue
+
+            try:
+                new_content = str(updated_soup).encode("utf-8")
+                item.set_content(new_content)
+            except Exception as e:
+                logger.error(f"写入内容失败 ({item.file_name}): {e}")
+                continue
+
+        # 添加样式
+        css = """
+        .original { font-weight: bold; margin-bottom: 0.5em; }
         .translation {
-            color: #555;
-            font-style: italic;
-            margin-top: 0.2em;
-            margin-bottom: 1em;
-            padding-left: 1em;
-            border-left: 2px solid #ccc;
+            color: #555; font-style: italic; margin: 0.2em 0 1em 0;
+            padding-left: 1em; border-left: 2px solid #ccc;
         }
-        '''
-        
-        # 创建CSS项目
-        nav_css = epub.EpubItem(
-            uid="style_nav",
-            file_name="style/nav.css",
+        """
+        css_item = epub.EpubItem(
+            uid="style_trans",
+            file_name="style/trans.css",
             media_type="text/css",
-            content=css_content
+            content=css,
         )
-        
-        # 添加CSS到书籍
-        book.add_item(nav_css)
-        
-        # 写入新文件
+        book.add_item(css_item)
+
+        # 🔧 修复 TOC 中缺失的 uid
+        def fix_toc_uids(toc, counter=None):
+            if counter is None:
+                counter = [0]
+            for item in toc:
+                if hasattr(item, "uid"):
+                    if item.uid is None:
+                        counter[0] += 1
+                        item.uid = f"toc_fixed_{counter[0]}"
+                elif isinstance(item, (list, tuple)) and len(item) >= 1:
+                    children = item[1] if len(item) > 1 else []
+                    if isinstance(children, list):
+                        fix_toc_uids(children, counter)
+
+        fix_toc_uids(book.toc)
+
         epub.write_epub(output_path, book, {})
-        
-        logger.info(f"翻译完成，输出文件: {output_path}")
+        logger.info(f"✅ 翻译完成: {output_path}")
+
 
 def main():
     import argparse
-    
-    parser = argparse.ArgumentParser(description='EPUB电子书翻译工具')
-    parser.add_argument('input_file', help='输入EPUB文件路径')
-    parser.add_argument('-o', '--output', help='输出EPUB文件路径', 
-                       default='translated_book.epub')
-    parser.add_argument('-l', '--language', help='目标翻译语言', 
-                       default='zh')
-    parser.add_argument('--api-url', help='本地API地址', 
-                       default='http://localhost:5001/v1/chat/completions')
-    
+
+    parser = argparse.ArgumentParser(description="上下文感知EPUB翻译工具")
+    parser.add_argument("input_file", help="输入EPUB路径")
+    parser.add_argument(
+        "-o", "--output", default="translated_book.epub", help="输出路径"
+    )
+    parser.add_argument("-l", "--language", default="zh", help="目标语言")
+    parser.add_argument(
+        "--api-url", default="http://localhost:5001/v1/chat/completions", help="API地址"
+    )
+    parser.add_argument(
+        "--no-context",
+        "-C",
+        action="store_true",
+        help="禁用上下文感知翻译（每段独立翻译）",
+    )  # ← 新增参数
     args = parser.parse_args()
-    
-    # 验证输入文件是否存在
+
     if not os.path.exists(args.input_file):
-        logger.error(f"输入文件不存在: {args.input_file}")
+        logger.error(f"❌ 输入文件不存在: {args.input_file}")
         return
-    
-    # 创建翻译器实例
-    translator = EPUBTranslator(api_url=args.api_url, target_language=args.language)
-    
+
+    translator = EPUBTranslator(
+        api_url=args.api_url,
+        target_language=args.language,
+        use_context=not args.no_context,  # ← 关键：取反
+    )
     try:
-        # 执行翻译
         translator.translate_epub(args.input_file, args.output)
-        print(f"\n翻译完成！输出文件: {args.output}")
+        print(f"\n🎉 翻译成功！输出文件: {os.path.abspath(args.output)}")
     except Exception as e:
-        logger.error(f"翻译过程中发生错误: {e}")
-        print(f"翻译失败: {e}")
+        logger.exception("💥 翻译过程崩溃")
+        print(f"\n❌ 翻译失败: {e}")
+
 
 if __name__ == "__main__":
     main()
