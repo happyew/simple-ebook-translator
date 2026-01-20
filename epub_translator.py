@@ -103,29 +103,28 @@ class EPUBTranslator:
         paragraphs = soup.find_all(tags)
         return [p for p in paragraphs if p.get_text().strip()]
 
-    def process_paragraphs(self, soup, total_paragraphs):
-        """处理段落并翻译（始终返回soup）"""
-        # 【可选】每章重置上下文：取消下一行注释
+    def process_paragraphs(self, soup, total_paragraphs, pbar=None):
+        """处理段落并翻译，支持传入全局进度条"""
+        # 【可选】每章重置上下文：
         # self.last_original = self.last_translation = None
 
         paragraphs = self.get_all_paragraphs(soup)
         logger.info(f"当前章节找到 {len(paragraphs)} 个段落需要翻译")
 
         if not paragraphs:
-            return soup  # ⚠️ 关键：即使无段落也返回原soup
+            return soup
 
-        for p in tqdm(paragraphs, desc="翻译进度", unit="段"):
+        for p in paragraphs:
             original_text = p.get_text().strip()
             if not original_text:
                 continue
 
-            current_index = getattr(self, "current_index", 0) + 1
-            setattr(self, "current_index", current_index)
+            self.current_index += 1
 
             try:
                 translated_text = self.translate_text(original_text)
 
-                print(f"\n--- 第({current_index}/{total_paragraphs})段 ---")
+                print(f"\n--- 第({self.current_index}/{total_paragraphs})段 ---")
                 print(f"原文: {original_text}")
                 print(f"译文: {translated_text}")
                 print("-" * 70)
@@ -139,13 +138,19 @@ class EPUBTranslator:
                 classes = p.get("class", []) + ["original"]
                 p["class"] = classes
 
-                time.sleep(1)
+                time.sleep(0.5)
+
+                # 更新全局进度条（如果提供）
+                if pbar is not None:
+                    pbar.update(1)
 
             except Exception as e:
                 logger.error(f"跳过段落（错误: {e}）")
+                if pbar is not None:
+                    pbar.update(1)  # 仍推进进度，避免卡住
                 continue
 
-        return soup  # ✅ 确保始终返回soup
+        return soup
 
     def count_total_paragraphs(self, book):
         """统计全文段落数"""
@@ -166,32 +171,37 @@ class EPUBTranslator:
         logger.info(f"共需翻译 {total_paragraphs} 段")
         self.current_index = 0
 
-        for item in book.get_items():
-            if item.get_type() != ebooklib.ITEM_DOCUMENT:
-                continue
+        # 👇 记录开始时间
+        start_time = time.time()
 
-            content = item.get_content()
-            if not content:
-                logger.debug(f"跳过空内容项: {item.file_name}")
-                continue
+        # 创建全局进度条
+        with tqdm(total=total_paragraphs, desc="全局翻译进度", unit="段") as pbar:
+            for item in book.get_items():
+                if item.get_type() != ebooklib.ITEM_DOCUMENT:
+                    continue
 
-            try:
-                soup = BeautifulSoup(content, "html.parser")
-            except Exception as e:
-                logger.warning(f"解析失败，跳过 {item.file_name}: {e}")
-                continue
+                content = item.get_content()
+                if not content:
+                    logger.debug(f"跳过空内容项: {item.file_name}")
+                    continue
 
-            updated_soup = self.process_paragraphs(soup, total_paragraphs)
-            if updated_soup is None:
-                logger.error(f"意外：process_paragraphs 返回 None ({item.file_name})")
-                continue
+                try:
+                    soup = BeautifulSoup(content, "html.parser")
+                except Exception as e:
+                    logger.warning(f"解析失败，跳过 {item.file_name}: {e}")
+                    continue
 
-            try:
-                new_content = str(updated_soup).encode("utf-8")
-                item.set_content(new_content)
-            except Exception as e:
-                logger.error(f"写入内容失败 ({item.file_name}): {e}")
-                continue
+                updated_soup = self.process_paragraphs(soup, total_paragraphs, pbar=pbar)
+                if updated_soup is None:
+                    logger.error(f"意外：process_paragraphs 返回 None ({item.file_name})")
+                    continue
+
+                try:
+                    new_content = str(updated_soup).encode("utf-8")
+                    item.set_content(new_content)
+                except Exception as e:
+                    logger.error(f"写入内容失败 ({item.file_name}): {e}")
+                    continue
 
         # 添加样式
         css = """
@@ -209,7 +219,7 @@ class EPUBTranslator:
         )
         book.add_item(css_item)
 
-        # 🔧 修复 TOC 中缺失的 uid
+        # 修复 TOC
         def fix_toc_uids(toc, counter=None):
             if counter is None:
                 counter = [0]
@@ -226,8 +236,17 @@ class EPUBTranslator:
         fix_toc_uids(book.toc)
 
         epub.write_epub(output_path, book, {})
-        logger.info(f"✅ 翻译完成: {output_path}")
 
+        # 👇 计算并记录总耗时
+        end_time = time.time()
+        total_seconds = end_time - start_time
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        logger.info(f"✅ 翻译完成: {output_path}")
+        logger.info(
+            f"⏱️ 总耗时: {int(hours)}小时 {int(minutes)}分 {seconds:.2f}秒 "
+            f"(共 {total_paragraphs} 段，平均 {total_seconds / total_paragraphs:.2f} 秒/段)"
+        )
 
 def main():
     import argparse
@@ -239,7 +258,7 @@ def main():
     )
     parser.add_argument("-l", "--language", default="zh", help="目标语言")
     parser.add_argument(
-        "--api-url", default="http://localhost:5001/v1/chat/completions", help="API地址"
+        "--api-url", default="http://localhost:1234/v1/chat/completions", help="API地址"
     )
     parser.add_argument(
         "--no-context",
