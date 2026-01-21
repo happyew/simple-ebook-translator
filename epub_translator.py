@@ -6,7 +6,7 @@ import re
 import requests
 import ebooklib
 from ebooklib import epub
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString
 import time
 import logging
 from tqdm import tqdm
@@ -29,12 +29,14 @@ class EPUBTranslator:
         target_language="zh",
         use_context=True,
         cache_file="translation_cache.json",
-        use_no_think=False,  # ← 新增参数
+        prompt_suffix="",
+        delay=0.5,
     ):
         self.api_url = api_url
         self.target_language = target_language
         self.use_context = use_context
-        self.use_no_think = use_no_think  # ← 控制 /no_think
+        self.prompt_suffix = prompt_suffix
+        self.delay = delay
         self.cache_file = Path(cache_file)
         self.session = requests.Session()
         self.session.headers.update(
@@ -93,7 +95,7 @@ class EPUBTranslator:
         messages = [
             {
                 "role": "system",
-                "content": "你是资深文学翻译专家，要求保留原文的文学美感和情感基调，使用优美流畅的中文表达，直接输出译文。",
+                "content": "你是资深文学翻译专家，要求保留原文的文学美感和情感基调，使用优美流畅的中文表达，不得保留任何英文单词, 直接输出译文。",
             }
         ]
 
@@ -105,12 +107,10 @@ class EPUBTranslator:
                 ]
             )
 
-        # 👇 关键修改：动态添加 /no_think
-        prompt_suffix = "/no_think" if self.use_no_think else ""
         messages.append(
             {
                 "role": "user",
-                "content": f"请将以下英文段落完整翻译为中文，**不得保留任何英文单词**，所有内容必须译为地道中文：\n{text}{prompt_suffix}",
+                "content": f"原文：\n{text}{self.prompt_suffix}",
             }
         )
 
@@ -127,7 +127,20 @@ class EPUBTranslator:
         try:
             response = self.session.post(self.api_url, json=payload, timeout=60)
             response.raise_for_status()
-            translated_text = response.json()["choices"][0]["message"]["content"]
+            data = response.json()
+
+            # 🔒 健壮性检查
+            if (
+                "choices" not in data
+                or not isinstance(data["choices"], list)
+                or len(data["choices"]) == 0
+            ):
+                raise ValueError(f"API 返回无效 choices: {data}")
+            choice = data["choices"][0]
+            if "message" not in choice or "content" not in choice["message"]:
+                raise ValueError(f"API 缺少 message.content: {choice}")
+
+            translated_text = choice["message"]["content"]
             cleaned_text = self.clean_think_tags(translated_text)
 
             self.translation_cache[cache_key] = cleaned_text
@@ -143,6 +156,29 @@ class EPUBTranslator:
             logger.error(f"翻译失败: {e}")
             raise
 
+    def _translate_preserving_tags(self, element):
+        """
+        递归翻译 element 中的所有文本节点，保留 HTML 结构。
+        """
+        if isinstance(element, str):
+            return self.translate_text(element.strip()) if element.strip() else element
+
+        if isinstance(element, NavigableString):
+            text = str(element).strip()
+            return self.translate_text(text) if text else str(element)
+
+        # 复制标签
+        new_tag = BeautifulSoup("", "html.parser").new_tag(
+            element.name, **element.attrs
+        )
+        for child in element.children:
+            translated_child = self._translate_preserving_tags(child)
+            if isinstance(translated_child, str):
+                new_tag.append(NavigableString(translated_child))
+            else:
+                new_tag.append(translated_child)
+        return new_tag
+
     def get_all_paragraphs(self, soup):
         tags = ["p", "h1", "h2", "h3", "h4", "h5", "h6"]
         paragraphs = soup.find_all(tags)
@@ -156,28 +192,36 @@ class EPUBTranslator:
             return soup
 
         for p in paragraphs:
-            original_text = p.get_text().strip()
-            if not original_text:
+            original_text_for_log = p.get_text().strip()
+            if not original_text_for_log:
                 continue
 
             self.current_index += 1
 
             try:
-                translated_text = self.translate_text(original_text)
-
-                print(f"\n--- 第({self.current_index}/{total_paragraphs})段 ---")
-                print(f"原文: {original_text}")
-                print(f"译文: {translated_text}")
-                print("-" * 70)
+                # 🌟 保留结构翻译
+                cloned_p = BeautifulSoup(str(p), "html.parser").contents[0]
+                translated_element = self._translate_preserving_tags(cloned_p)
 
                 trans_tag = soup.new_tag("p", **{"class": "translation"})
-                trans_tag.string = translated_text
+                if hasattr(translated_element, "name"):
+                    trans_tag.append(translated_element)
+                else:
+                    trans_tag.string = str(translated_element)
+
                 p.insert_after(trans_tag)
+                p["class"] = (p.get("class", []) or []) + ["original"]
 
-                classes = p.get("class", []) + ["original"]
-                p["class"] = classes
+                # 日志打印用纯文本
+                translated_text_for_log = trans_tag.get_text().strip()
 
-                time.sleep(0.5)
+                print(f"\n--- 第({self.current_index}/{total_paragraphs})段 ---")
+                print(f"原文: {original_text_for_log}")
+                print(f"译文: {translated_text_for_log}")
+                print("-" * 70)
+
+                if self.delay > 0:
+                    time.sleep(self.delay)
 
                 if pbar is not None:
                     pbar.update(1)
@@ -214,6 +258,10 @@ class EPUBTranslator:
                 for item in book.get_items():
                     if item.get_type() != ebooklib.ITEM_DOCUMENT:
                         continue
+
+                    # ✅ 重置上下文：防止跨章节污染
+                    self.last_original = None
+                    self.last_translation = None
 
                     content = item.get_content()
                     if not content:
@@ -290,11 +338,14 @@ class EPUBTranslator:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="支持断点续译与/no_think开关的EPUB翻译工具"
+        description="支持断点续译、保留HTML标签、自定义prompt后缀的EPUB翻译工具"
     )
     parser.add_argument("input_file", help="输入EPUB路径")
     parser.add_argument(
-        "-o", "--output", default="translated_book.epub", help="输出路径"
+        "-o",
+        "--output",
+        default=None,
+        help="输出路径（默认: <输入文件>_translated.epub）",
     )
     parser.add_argument("-l", "--language", default="zh", help="目标语言")
     parser.add_argument(
@@ -312,22 +363,35 @@ def main():
         help="翻译缓存文件路径",
     )
     parser.add_argument(
-        "--no-think",
-        action="store_true",
-        help="增加/no_think 后缀（只适用于支持该指令的模型）",
-    )  # ← 新增开关
+        "--prompt-suffix",
+        default="",
+        help="附加到用户 prompt 末尾的字符串（例如 '/no_think'）",
+    )
+    parser.add_argument(
+        "--delay",
+        type=float,
+        default=0,
+        help="每段翻译后的延迟（秒），避免 API 过载（默认: 0）",
+    )
+
     args = parser.parse_args()
 
     if not os.path.exists(args.input_file):
         logger.error(f"❌ 输入文件不存在: {args.input_file}")
         return
 
+    # 智能输出文件名
+    if args.output is None:
+        input_path = Path(args.input_file)
+        args.output = str(input_path.with_stem(input_path.stem + "_translated"))
+
     translator = EPUBTranslator(
         api_url=args.api_url,
         target_language=args.language,
         use_context=not args.no_context,
         cache_file=args.cache,
-        use_no_think=args.no_think,  # ← 默认不启用，除非用户指定 --no-think
+        prompt_suffix=args.prompt_suffix,
+        delay=args.delay,
     )
     try:
         translator.translate_epub(args.input_file, args.output)
