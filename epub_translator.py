@@ -14,12 +14,22 @@ import json
 import hashlib
 from pathlib import Path
 import argparse
+import atexit
+import copy
 
 # 配置日志
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+# 不应翻译的标签（保留原始内容）
+SKIP_TAGS = {"code", "pre", "script", "style", "math", "svg", "kbd", "samp", "tt"}
+
+
+def is_meaningful_text(text: str) -> bool:
+    """判断是否包含可见字符（排除空格、零宽字符等）"""
+    return bool(re.search(r"[^\s\u200b\u200c\u200d\ufeff]", text))
 
 
 class EPUBTranslator:
@@ -28,16 +38,26 @@ class EPUBTranslator:
         api_url="http://localhost:5001/v1/chat/completions",
         target_language="zh",
         use_context=True,
-        cache_file="translation_cache.json",
+        cache_file=None,
         prompt_suffix="",
         delay=0.5,
+        input_epub_path=None,
     ):
         self.api_url = api_url
         self.target_language = target_language
         self.use_context = use_context
         self.prompt_suffix = prompt_suffix
         self.delay = delay
-        self.cache_file = Path(cache_file)
+
+        # 自动生成缓存文件名：输入.epub → 输入.json
+        if cache_file is None:
+            if input_epub_path:
+                self.cache_file = Path(input_epub_path).with_suffix(".json")
+            else:
+                self.cache_file = Path("translation_cache.json")
+        else:
+            self.cache_file = Path(cache_file)
+
         self.session = requests.Session()
         self.session.headers.update(
             {"Content-Type": "application/json", "User-Agent": "EPUBTranslator/1.0"}
@@ -47,6 +67,9 @@ class EPUBTranslator:
 
         self.translation_cache = self._load_cache()
         self._cache_modified = False
+
+        # 注册退出时保存缓存
+        atexit.register(self._save_cache)
 
     def _load_cache(self):
         if self.cache_file.exists():
@@ -76,7 +99,7 @@ class EPUBTranslator:
         return hashlib.md5(text.encode("utf-8")).hexdigest()
 
     def clean_think_tags(self, text):
-        pattern = r"<think>.*?</think>"
+        pattern = r"\<think\>.*?\<\/think\>"
         return re.sub(pattern, "", text, flags=re.DOTALL).strip()
 
     def translate_text(self, text):
@@ -129,7 +152,6 @@ class EPUBTranslator:
             response.raise_for_status()
             data = response.json()
 
-            # 🔒 健壮性检查
             if (
                 "choices" not in data
                 or not isinstance(data["choices"], list)
@@ -145,8 +167,6 @@ class EPUBTranslator:
 
             self.translation_cache[cache_key] = cleaned_text
             self._cache_modified = True
-            if len(self.translation_cache) % 10 == 0:
-                self._save_cache()
 
             self.last_original = text
             self.last_translation = cleaned_text
@@ -159,30 +179,29 @@ class EPUBTranslator:
     def _translate_preserving_tags(self, element):
         """
         递归翻译 element 中的所有文本节点，保留 HTML 结构。
+        跳过不应翻译的标签（如 code, pre 等）。
         """
-        if isinstance(element, str):
-            return self.translate_text(element.strip()) if element.strip() else element
+        if isinstance(element, (str, NavigableString)):
+            text = str(element)
+            if is_meaningful_text(text):
+                return self.translate_text(text.strip())
+            else:
+                return str(element)
 
-        if isinstance(element, NavigableString):
-            text = str(element).strip()
-            return self.translate_text(text) if text else str(element)
+        if element.name in SKIP_TAGS:
+            return copy.copy(element)
 
-        # 复制标签
-        new_tag = BeautifulSoup("", "html.parser").new_tag(
-            element.name, **element.attrs
-        )
+        # 注意：这里使用 HTML 模式 ("lxml") 构造新标签，确保输出兼容 EPUB 阅读器
+        new_tag = BeautifulSoup("", "lxml").new_tag(element.name, **element.attrs)
         for child in element.children:
             translated_child = self._translate_preserving_tags(child)
-            if isinstance(translated_child, str):
-                new_tag.append(NavigableString(translated_child))
-            else:
-                new_tag.append(translated_child)
+            new_tag.append(translated_child)
         return new_tag
 
     def get_all_paragraphs(self, soup):
         tags = ["p", "h1", "h2", "h3", "h4", "h5", "h6"]
         paragraphs = soup.find_all(tags)
-        return [p for p in paragraphs if p.get_text().strip()]
+        return [p for p in paragraphs if is_meaningful_text(p.get_text())]
 
     def process_paragraphs(self, soup, total_paragraphs, pbar=None):
         paragraphs = self.get_all_paragraphs(soup)
@@ -192,15 +211,15 @@ class EPUBTranslator:
             return soup
 
         for p in paragraphs:
-            original_text_for_log = p.get_text().strip()
-            if not original_text_for_log:
+            original_text_for_log = p.get_text()
+            if not is_meaningful_text(original_text_for_log):
                 continue
 
             self.current_index += 1
 
             try:
-                # 🌟 保留结构翻译
-                cloned_p = BeautifulSoup(str(p), "html.parser").contents[0]
+                # 使用 XML 模式解析原始段落（因为来自 XHTML）
+                cloned_p = BeautifulSoup(str(p), "lxml-xml").contents[0]
                 translated_element = self._translate_preserving_tags(cloned_p)
 
                 trans_tag = soup.new_tag("p", **{"class": "translation"})
@@ -212,7 +231,6 @@ class EPUBTranslator:
                 p.insert_after(trans_tag)
                 p["class"] = (p.get("class", []) or []) + ["original"]
 
-                # 日志打印用纯文本
                 translated_text_for_log = trans_tag.get_text().strip()
 
                 print(f"\n--- 第({self.current_index}/{total_paragraphs})段 ---")
@@ -240,7 +258,8 @@ class EPUBTranslator:
             if item.get_type() == ebooklib.ITEM_DOCUMENT:
                 content = item.get_content()
                 if content:
-                    soup = BeautifulSoup(content, "html.parser")
+                    # 使用 XML 模式解析 EPUB 内容
+                    soup = BeautifulSoup(content, "lxml-xml")
                     total += len(self.get_all_paragraphs(soup))
         return total
 
@@ -259,7 +278,6 @@ class EPUBTranslator:
                     if item.get_type() != ebooklib.ITEM_DOCUMENT:
                         continue
 
-                    # ✅ 重置上下文：防止跨章节污染
                     self.last_original = None
                     self.last_translation = None
 
@@ -269,7 +287,8 @@ class EPUBTranslator:
                         continue
 
                     try:
-                        soup = BeautifulSoup(content, "html.parser")
+                        # 使用 XML 模式解析
+                        soup = BeautifulSoup(content, "lxml-xml")
                     except Exception as e:
                         logger.warning(f"解析失败，跳过 {item.file_name}: {e}")
                         continue
@@ -359,8 +378,8 @@ def main():
     )
     parser.add_argument(
         "--cache",
-        default="translation_cache.json",
-        help="翻译缓存文件路径",
+        default=None,
+        help="翻译缓存文件路径（默认: <输入文件>.json）",
     )
     parser.add_argument(
         "--prompt-suffix",
@@ -380,7 +399,6 @@ def main():
         logger.error(f"❌ 输入文件不存在: {args.input_file}")
         return
 
-    # 智能输出文件名
     if args.output is None:
         input_path = Path(args.input_file)
         args.output = str(input_path.with_stem(input_path.stem + "_translated"))
@@ -392,6 +410,7 @@ def main():
         cache_file=args.cache,
         prompt_suffix=args.prompt_suffix,
         delay=args.delay,
+        input_epub_path=args.input_file,
     )
     try:
         translator.translate_epub(args.input_file, args.output)
