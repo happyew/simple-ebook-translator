@@ -17,6 +17,14 @@ import argparse
 import atexit
 import copy
 
+# 新增依赖
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+)
+
 # 配置日志
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -71,6 +79,14 @@ class EPUBTranslator:
         # 注册退出时保存缓存
         atexit.register(self._save_cache)
 
+    @staticmethod
+    def get_local_name(tag):
+        """从带命名空间的标签名中提取本地名，如 '{http://...}p' -> 'p'"""
+        if not tag or not hasattr(tag, "name") or not tag.name:
+            return None
+        name = tag.name
+        return name.split("}")[-1] if "}" in name else name
+
     def _load_cache(self):
         if self.cache_file.exists():
             try:
@@ -101,6 +117,29 @@ class EPUBTranslator:
     def clean_think_tags(self, text):
         pattern = r"\<think\>.*?\<\/think\>"
         return re.sub(pattern, "", text, flags=re.DOTALL).strip()
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type((requests.RequestException, ValueError)),
+        reraise=True,
+    )
+    def _call_translation_api(self, payload):
+        response = self.session.post(self.api_url, json=payload, timeout=60)
+        response.raise_for_status()
+        data = response.json()
+
+        if (
+            "choices" not in data
+            or not isinstance(data["choices"], list)
+            or len(data["choices"]) == 0
+        ):
+            raise ValueError(f"API 返回无效 choices: {data}")
+        choice = data["choices"][0]
+        if "message" not in choice or "content" not in choice["message"]:
+            raise ValueError(f"API 缺少 message.content: {choice}")
+
+        return choice["message"]["content"]
 
     def translate_text(self, text):
         if not text.strip():
@@ -148,21 +187,7 @@ class EPUBTranslator:
         }
 
         try:
-            response = self.session.post(self.api_url, json=payload, timeout=60)
-            response.raise_for_status()
-            data = response.json()
-
-            if (
-                "choices" not in data
-                or not isinstance(data["choices"], list)
-                or len(data["choices"]) == 0
-            ):
-                raise ValueError(f"API 返回无效 choices: {data}")
-            choice = data["choices"][0]
-            if "message" not in choice or "content" not in choice["message"]:
-                raise ValueError(f"API 缺少 message.content: {choice}")
-
-            translated_text = choice["message"]["content"]
+            translated_text = self._call_translation_api(payload)
             cleaned_text = self.clean_think_tags(translated_text)
 
             self.translation_cache[cache_key] = cleaned_text
@@ -173,7 +198,7 @@ class EPUBTranslator:
             return cleaned_text
 
         except Exception as e:
-            logger.error(f"翻译失败: {e}")
+            logger.error(f"翻译失败（已重试）: {e}")
             raise
 
     def _translate_preserving_tags(self, element):
@@ -188,20 +213,25 @@ class EPUBTranslator:
             else:
                 return str(element)
 
-        if element.name in SKIP_TAGS:
+        local_name = self.get_local_name(element)
+        if local_name in SKIP_TAGS:
             return copy.copy(element)
 
-        # 注意：这里使用 HTML 模式 ("lxml") 构造新标签，确保输出兼容 EPUB 阅读器
-        new_tag = BeautifulSoup("", "lxml").new_tag(element.name, **element.attrs)
+        # 使用 XML 模式构造新标签
+        soup_xml = BeautifulSoup("", "lxml-xml")
+        new_tag = soup_xml.new_tag(local_name, **element.attrs)
         for child in element.children:
             translated_child = self._translate_preserving_tags(child)
             new_tag.append(translated_child)
         return new_tag
 
     def get_all_paragraphs(self, soup):
-        tags = ["p", "h1", "h2", "h3", "h4", "h5", "h6"]
-        paragraphs = soup.find_all(tags)
-        return [p for p in paragraphs if is_meaningful_text(p.get_text())]
+        tags = {"p", "h1", "h2", "h3", "h4", "h5", "h6"}
+        paragraphs = []
+        for tag in soup.find_all():
+            if self.get_local_name(tag) in tags and is_meaningful_text(tag.get_text()):
+                paragraphs.append(tag)
+        return paragraphs
 
     def process_paragraphs(self, soup, total_paragraphs, pbar=None):
         paragraphs = self.get_all_paragraphs(soup)
@@ -218,8 +248,15 @@ class EPUBTranslator:
             self.current_index += 1
 
             try:
-                # 使用 XML 模式解析原始段落（因为来自 XHTML）
-                cloned_p = BeautifulSoup(str(p), "lxml-xml").contents[0]
+                p_str = str(p)
+                if not p_str.strip():
+                    continue
+                parsed = BeautifulSoup(p_str, "lxml-xml")
+                if not parsed.contents:
+                    logger.warning("空段落内容，跳过")
+                    continue
+                cloned_p = parsed.contents[0]
+
                 translated_element = self._translate_preserving_tags(cloned_p)
 
                 trans_tag = soup.new_tag("p", **{"class": "translation"})
@@ -258,7 +295,6 @@ class EPUBTranslator:
             if item.get_type() == ebooklib.ITEM_DOCUMENT:
                 content = item.get_content()
                 if content:
-                    # 使用 XML 模式解析 EPUB 内容
                     soup = BeautifulSoup(content, "lxml-xml")
                     total += len(self.get_all_paragraphs(soup))
         return total
@@ -287,7 +323,6 @@ class EPUBTranslator:
                         continue
 
                     try:
-                        # 使用 XML 模式解析
                         soup = BeautifulSoup(content, "lxml-xml")
                     except Exception as e:
                         logger.warning(f"解析失败，跳过 {item.file_name}: {e}")
@@ -415,9 +450,16 @@ def main():
     try:
         translator.translate_epub(args.input_file, args.output)
         print(f"\n🎉 翻译成功！输出文件: {os.path.abspath(args.output)}")
+    except KeyboardInterrupt:
+        logger.info("🛑 用户中断翻译，正在保存缓存...")
+        translator._save_cache()
+        print("\n⚠️  已保存缓存，下次可继续翻译。")
+        return
     except Exception as e:
         logger.exception("💥 翻译过程崩溃")
         print(f"\n❌ 翻译失败: {e}")
+        # 可选：崩溃时也保存缓存
+        translator._save_cache()
 
 
 if __name__ == "__main__":
