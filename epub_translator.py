@@ -43,7 +43,7 @@ def is_meaningful_text(text: str) -> bool:
 class EPUBTranslator:
     def __init__(
         self,
-        api_url="http://localhost:5001/v1/chat/completions",
+        api_url="http://localhost:1234/v1/chat/completions",
         target_language="zh",
         use_context=True,
         cache_file=None,
@@ -266,13 +266,18 @@ class EPUBTranslator:
                     trans_tag.string = str(translated_element)
 
                 p.insert_after(trans_tag)
-                p["class"] = (p.get("class", []) or []) + ["original"]
+                current_classes = p.get("class", [])
+                if isinstance(current_classes, str):
+                    current_classes = current_classes.split()
+                elif not isinstance(current_classes, list):
+                    current_classes = []
+                p["class"] = current_classes + ["original"]
 
                 translated_text_for_log = trans_tag.get_text().strip()
 
                 print(f"\n--- 第({self.current_index}/{total_paragraphs})段 ---")
-                print(f"原文: {original_text_for_log}")
-                print(f"译文: {translated_text_for_log}")
+                print(f"原文:\n{original_text_for_log}")
+                print(f"译文:\n{translated_text_for_log}")
                 print("-" * 70)
 
                 if self.delay > 0:
