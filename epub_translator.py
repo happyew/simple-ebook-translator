@@ -30,14 +30,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# 不应翻译的标签（保留原始内容）
-SKIP_TAGS = {"code", "pre", "script", "style", "math", "svg", "kbd", "samp", "tt"}
-
-
-def is_meaningful_text(text: str) -> bool:
-    """判断是否包含可见字符（排除空格、零宽字符等）"""
-    return bool(re.search(r"[^\s\u200b\u200c\u200d\ufeff]", text))
-
 
 class EPUBTranslator:
     def __init__(
@@ -112,8 +104,10 @@ class EPUBTranslator:
         except Exception as e:
             logger.error(f"❌ 缓存保存失败: {e}")
 
-    def _get_cache_key(self, text):
-        return hashlib.md5(text.encode("utf-8")).hexdigest()
+    def _get_cache_key(self, text, tag_type="p"):
+        # 将 tag_type 纳入缓存 key，允许同一文本在不同上下文（p/h）有不同译文
+        key_str = f"{tag_type}:{text}"
+        return hashlib.md5(key_str.encode("utf-8")).hexdigest()
 
     def clean_think_tags(self, text):
         pattern = r"\<think\>.*?\<\/think\>"
@@ -142,40 +136,50 @@ class EPUBTranslator:
 
         return choice["message"]["content"]
 
-    def translate_text(self, text):
+    def translate_text(self, text, tag_type="p", use_context_override=None):
         if not text.strip():
             return ""
 
-        cache_key = self._get_cache_key(text)
+        cache_key = self._get_cache_key(text, tag_type)
 
         if cache_key in self.translation_cache:
-            logger.debug(f"🔁 命中缓存: {text[:30]}...")
-            cached_translation = self.translation_cache[cache_key]
-            self.last_original = text
-            self.last_translation = cached_translation
-            return cached_translation
+            logger.debug(f"🔁 命中缓存 ({tag_type}): {text[:30]}...")
+            return self.translation_cache[cache_key]
 
-        messages = [
-            {
-                "role": "system",
-                "content": "你是资深文学翻译专家，要求保留原文的文学美感和情感基调，使用优美流畅的中文表达，不得保留任何英文单词, 直接输出译文。",
-            }
-        ]
-
-        if self.use_context and self.last_original and self.last_translation:
-            messages.extend(
-                [
-                    {"role": "user", "content": self.last_original},
-                    {"role": "assistant", "content": self.last_translation},
-                ]
+        # 根据 tag_type 选择 system prompt
+        if tag_type == "p":
+            system_prompt = (
+                "你是资深文学翻译专家，要求译文保留原文的文学美感和情感基调，"
+                "不得保留任何英文单词，使用优美流畅的中文表达，直接输出译文。"
+            )
+        elif tag_type.startswith("h"):  # h1, h2, ..., h6
+            system_prompt = (
+                "你是一名专业本地化工程师，请将以下标题翻译成简洁、准确、符合中文阅读习惯的短语，"
+                "不要添加解释、引号、句号或其他标点，直接输出译文。"
+            )
+        else:
+            system_prompt = (
+                "请将以下文本翻译成目标语言，保持原意，语言自然。"
             )
 
-        messages.append(
-            {
-                "role": "user",
-                "content": f"原文：\n{text}{self.prompt_suffix}",
-            }
+        messages = [{"role": "system", "content": system_prompt}]
+
+        should_use_context = (
+            (use_context_override if use_context_override is not None else self.use_context)
+            and self.last_original
+            and self.last_translation
         )
+
+        if should_use_context:
+            messages.extend([
+                {"role": "user", "content": self.last_original},
+                {"role": "assistant", "content": self.last_translation},
+            ])
+
+        messages.append({
+            "role": "user",
+            "content": f"原文：\n{text}{self.prompt_suffix}",
+        })
 
         payload = {
             "model": "Qwen3-14B",
@@ -194,8 +198,6 @@ class EPUBTranslator:
             self.translation_cache[cache_key] = cleaned_text
             self._cache_modified = True
 
-            self.last_original = text
-            self.last_translation = cleaned_text
             return cleaned_text
 
         except Exception as e:
@@ -221,13 +223,22 @@ class EPUBTranslator:
 
             self.current_index += 1
 
+            tag_name = self.get_local_name(p).lower() if self.get_local_name(p) else ""
+            is_paragraph = (tag_name == "p")
+            tag_type = tag_name  # e.g., "p", "h1", "h2", etc.
+
             try:
-                translated_text = self.translate_text(original_text)
+                use_ctx = is_paragraph  # 只有 <p> 使用上下文
+                translated_text = self.translate_text(
+                    original_text,
+                    tag_type=tag_type,
+                    use_context_override=use_ctx
+                )
 
                 if not self.quiet:
-                    print(f"\n--- 第({self.current_index}/{total_paragraphs})段 ---")
-                    print(f"{original_text}\n")
-                    print(f"{translated_text}")
+                    print(f"\n--- 第({self.current_index}/{total_paragraphs})段 [{tag_type}] ---")
+                    print(f"\n原文:\n{original_text}")
+                    print(f"\n译文:\n{translated_text}")
                     print("-" * 70)
 
                 trans_tag = soup.new_tag("p", **{"class": "translation"})
@@ -236,6 +247,11 @@ class EPUBTranslator:
 
                 classes = p.get("class", []) + ["original"]
                 p["class"] = classes
+
+                # ✅ 只有 <p> 才更新上下文历史
+                if is_paragraph:
+                    self.last_original = original_text
+                    self.last_translation = translated_text
 
                 if self.delay > 0:
                     time.sleep(self.delay)
