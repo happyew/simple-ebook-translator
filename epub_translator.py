@@ -50,12 +50,14 @@ class EPUBTranslator:
         prompt_suffix="",
         delay=0.5,
         input_epub_path=None,
+        quiet=False,
     ):
         self.api_url = api_url
         self.target_language = target_language
         self.use_context = use_context
         self.prompt_suffix = prompt_suffix
         self.delay = delay
+        self.quiet = quiet
 
         # 自动生成缓存文件名：输入.epub → 输入.json
         if cache_file is None:
@@ -235,7 +237,7 @@ class EPUBTranslator:
 
     def process_paragraphs(self, soup, total_paragraphs, pbar=None):
         paragraphs = self.get_all_paragraphs(soup)
-        logger.info(f"当前章节找到 {len(paragraphs)} 个段落需要翻译")
+        logger.debug(f"当前章节找到 {len(paragraphs)} 个段落需要翻译")
 
         if not paragraphs:
             return soup
@@ -274,11 +276,11 @@ class EPUBTranslator:
                 p["class"] = current_classes + ["original"]
 
                 translated_text_for_log = trans_tag.get_text().strip()
-
-                print(f"\n--- 第({self.current_index}/{total_paragraphs})段 ---")
-                print(f"{original_text_for_log}")
-                print(f"{translated_text_for_log}")
-                print("-" * 70)
+                if not self.quiet:
+                    print(f"\n--- 第({self.current_index}/{total_paragraphs})段 ---")
+                    print(f"{original_text_for_log}")
+                    print(f"{translated_text_for_log}")
+                    print("-" * 70)
 
                 if self.delay > 0:
                     time.sleep(self.delay)
@@ -432,6 +434,12 @@ def main():
         default=0,
         help="每段翻译后的延迟（秒），避免 API 过载（默认: 0）",
     )
+    parser.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="静默模式：不显示原文与译文，仅显示进度",
+    )
 
     args = parser.parse_args()
 
@@ -451,6 +459,7 @@ def main():
         prompt_suffix=args.prompt_suffix,
         delay=args.delay,
         input_epub_path=args.input_file,
+        quiet=args.quiet,
     )
     try:
         translator.translate_epub(args.input_file, args.output)
