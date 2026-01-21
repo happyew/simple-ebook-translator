@@ -6,7 +6,7 @@ import re
 import requests
 import ebooklib
 from ebooklib import epub
-from bs4 import BeautifulSoup, NavigableString
+from bs4 import BeautifulSoup
 import time
 import logging
 from tqdm import tqdm
@@ -15,7 +15,6 @@ import hashlib
 from pathlib import Path
 import argparse
 import atexit
-import copy
 
 # 新增依赖
 from tenacity import (
@@ -203,37 +202,10 @@ class EPUBTranslator:
             logger.error(f"翻译失败（已重试）: {e}")
             raise
 
-    def _translate_preserving_tags(self, element):
-        """
-        递归翻译 element 中的所有文本节点，保留 HTML 结构。
-        跳过不应翻译的标签（如 code, pre 等）。
-        """
-        if isinstance(element, (str, NavigableString)):
-            text = str(element)
-            if is_meaningful_text(text):
-                return self.translate_text(text.strip())
-            else:
-                return str(element)
-
-        local_name = self.get_local_name(element)
-        if local_name in SKIP_TAGS:
-            return copy.copy(element)
-
-        # 使用 XML 模式构造新标签
-        soup_xml = BeautifulSoup("", "lxml-xml")
-        new_tag = soup_xml.new_tag(local_name, **element.attrs)
-        for child in element.children:
-            translated_child = self._translate_preserving_tags(child)
-            new_tag.append(translated_child)
-        return new_tag
-
     def get_all_paragraphs(self, soup):
-        tags = {"p", "h1", "h2", "h3", "h4", "h5", "h6"}
-        paragraphs = []
-        for tag in soup.find_all():
-            if self.get_local_name(tag) in tags and is_meaningful_text(tag.get_text()):
-                paragraphs.append(tag)
-        return paragraphs
+        tags = ["p", "h1", "h2", "h3", "h4", "h5", "h6"]
+        paragraphs = soup.find_all(tags)
+        return [p for p in paragraphs if p.get_text().strip()]
 
     def process_paragraphs(self, soup, total_paragraphs, pbar=None):
         paragraphs = self.get_all_paragraphs(soup)
@@ -243,44 +215,27 @@ class EPUBTranslator:
             return soup
 
         for p in paragraphs:
-            original_text_for_log = p.get_text()
-            if not is_meaningful_text(original_text_for_log):
+            original_text = p.get_text().strip()
+            if not original_text:
                 continue
 
             self.current_index += 1
 
             try:
-                p_str = str(p)
-                if not p_str.strip():
-                    continue
-                parsed = BeautifulSoup(p_str, "lxml-xml")
-                if not parsed.contents:
-                    logger.warning("空段落内容，跳过")
-                    continue
-                cloned_p = parsed.contents[0]
+                translated_text = self.translate_text(original_text)
 
-                translated_element = self._translate_preserving_tags(cloned_p)
-
-                trans_tag = soup.new_tag("p", **{"class": "translation"})
-                if hasattr(translated_element, "name"):
-                    trans_tag.append(translated_element)
-                else:
-                    trans_tag.string = str(translated_element)
-
-                p.insert_after(trans_tag)
-                current_classes = p.get("class", [])
-                if isinstance(current_classes, str):
-                    current_classes = current_classes.split()
-                elif not isinstance(current_classes, list):
-                    current_classes = []
-                p["class"] = current_classes + ["original"]
-
-                translated_text_for_log = trans_tag.get_text().strip()
                 if not self.quiet:
                     print(f"\n--- 第({self.current_index}/{total_paragraphs})段 ---")
-                    print(f"{original_text_for_log}")
-                    print(f"{translated_text_for_log}")
+                    print(f"{original_text}\n")
+                    print(f"{translated_text}")
                     print("-" * 70)
+
+                trans_tag = soup.new_tag("p", **{"class": "translation"})
+                trans_tag.string = translated_text
+                p.insert_after(trans_tag)
+
+                classes = p.get("class", []) + ["original"]
+                p["class"] = classes
 
                 if self.delay > 0:
                     time.sleep(self.delay)
@@ -302,7 +257,7 @@ class EPUBTranslator:
             if item.get_type() == ebooklib.ITEM_DOCUMENT:
                 content = item.get_content()
                 if content:
-                    soup = BeautifulSoup(content, "lxml-xml")
+                    soup = BeautifulSoup(content, "html.parser")
                     total += len(self.get_all_paragraphs(soup))
         return total
 
@@ -330,7 +285,7 @@ class EPUBTranslator:
                         continue
 
                     try:
-                        soup = BeautifulSoup(content, "lxml-xml")
+                        soup = BeautifulSoup(content, "html.parser")
                     except Exception as e:
                         logger.warning(f"解析失败，跳过 {item.file_name}: {e}")
                         continue
