@@ -276,8 +276,8 @@ class EPUBTranslator:
                 translated_text_for_log = trans_tag.get_text().strip()
 
                 print(f"\n--- 第({self.current_index}/{total_paragraphs})段 ---")
-                print(f"原文:\n{original_text_for_log}")
-                print(f"译文:\n{translated_text_for_log}")
+                print(f"{original_text_for_log}")
+                print(f"{translated_text_for_log}")
                 print("-" * 70)
 
                 if self.delay > 0:
