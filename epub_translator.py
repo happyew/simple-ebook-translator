@@ -163,21 +163,29 @@ class EPUBTranslator:
         messages = [{"role": "system", "content": system_prompt}]
 
         should_use_context = (
-            (use_context_override if use_context_override is not None else self.use_context)
+            (
+                use_context_override
+                if use_context_override is not None
+                else self.use_context
+            )
             and self.last_original
             and self.last_translation
         )
 
         if should_use_context:
-            messages.extend([
-                {"role": "user", "content": self.last_original},
-                {"role": "assistant", "content": self.last_translation},
-            ])
+            messages.extend(
+                [
+                    {"role": "user", "content": self.last_original},
+                    {"role": "assistant", "content": self.last_translation},
+                ]
+            )
 
-        messages.append({
-            "role": "user",
-            "content": f"原文：\n{text}{self.prompt_suffix}",
-        })
+        messages.append(
+            {
+                "role": "user",
+                "content": f"原文：\n{text}{self.prompt_suffix}",
+            }
+        )
 
         payload = {
             "model": "Qwen3-14B",
@@ -222,20 +230,20 @@ class EPUBTranslator:
             self.current_index += 1
 
             tag_name = self.get_local_name(p).lower() if self.get_local_name(p) else ""
-            is_paragraph = (tag_name == "p")
+            is_paragraph = tag_name == "p"
             tag_type = tag_name  # e.g., "p", "h1", "h2", etc.
 
             try:
                 use_ctx = is_paragraph  # 只有 <p> 使用上下文
                 translated_text, from_cache = self.translate_text(
-                    original_text,
-                    tag_type=tag_type,
-                    use_context_override=use_ctx
+                    original_text, tag_type=tag_type, use_context_override=use_ctx
                 )
 
                 # 仅当未命中缓存且非静默模式时才打印原文与译文
                 if not self.quiet and not from_cache:
-                    print(f"\n--- 第({self.current_index}/{total_paragraphs})段 [{tag_type}] ---")
+                    print(
+                        f"\n--- 第({self.current_index}/{total_paragraphs})段 [{tag_type}] ---"
+                    )
                     print(f"\n原文:\n{original_text}")
                     print(f"\n译文:\n{translated_text}")
                     print("-" * 70)
