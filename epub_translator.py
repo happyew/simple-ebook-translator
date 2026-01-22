@@ -134,6 +134,19 @@ class EPUBTranslator:
 
         return choice["message"]["content"]
 
+    def _calculate_max_tokens(self, text: str) -> int:
+        """根据原文长度动态计算 max_tokens"""
+        char_count = len(text)
+
+        # 系数可根据场景调整（此处用 2.0 保安全）
+        estimated_tokens = int(char_count * 2.0)
+
+        # 设置合理边界
+        min_tokens = 100  # 避免极短文本分配过少
+        max_tokens = 2000  # 不超过模型输出上限
+
+        return min(max_tokens, max(min_tokens, estimated_tokens))
+
     def translate_text(self, text, tag_type="p", use_context_override=None):
         if not text.strip():
             return "", True
@@ -191,7 +204,7 @@ class EPUBTranslator:
             "model": "Qwen3-14B",
             "messages": messages,
             "temperature": 0.7,
-            "max_tokens": 1000,
+            "max_tokens": self._calculate_max_tokens(text),
             "top_p": 0.8,
             "top_k": 20,
             "min_p": 0.0,
@@ -294,7 +307,7 @@ class EPUBTranslator:
         start_time = time.time()
 
         try:
-            with tqdm(total=total_paragraphs, desc="全局翻译进度", unit="段") as pbar:
+            with tqdm(total=total_paragraphs, desc="翻译进度", unit="段") as pbar:
                 for item in book.get_items():
                     if item.get_type() != ebooklib.ITEM_DOCUMENT:
                         continue
