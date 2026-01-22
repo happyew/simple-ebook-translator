@@ -35,7 +35,6 @@ class EPUBTranslator:
     def __init__(
         self,
         api_url="http://localhost:1234/v1/chat/completions",
-        target_language="zh",
         use_context=True,
         cache_file=None,
         prompt_suffix="",
@@ -44,7 +43,6 @@ class EPUBTranslator:
         quiet=False,
     ):
         self.api_url = api_url
-        self.target_language = target_language
         self.use_context = use_context
         self.prompt_suffix = prompt_suffix
         self.delay = delay
@@ -138,13 +136,13 @@ class EPUBTranslator:
 
     def translate_text(self, text, tag_type="p", use_context_override=None):
         if not text.strip():
-            return ""
+            return "", True
 
         cache_key = self._get_cache_key(text, tag_type)
 
         if cache_key in self.translation_cache:
             logger.debug(f"🔁 命中缓存 ({tag_type}): {text[:30]}...")
-            return self.translation_cache[cache_key]
+            return self.translation_cache[cache_key], True
 
         # 根据 tag_type 选择 system prompt
         if tag_type == "p":
@@ -198,7 +196,7 @@ class EPUBTranslator:
             self.translation_cache[cache_key] = cleaned_text
             self._cache_modified = True
 
-            return cleaned_text
+            return cleaned_text, False
 
         except Exception as e:
             logger.error(f"翻译失败（已重试）: {e}")
@@ -229,13 +227,14 @@ class EPUBTranslator:
 
             try:
                 use_ctx = is_paragraph  # 只有 <p> 使用上下文
-                translated_text = self.translate_text(
+                translated_text, from_cache = self.translate_text(
                     original_text,
                     tag_type=tag_type,
                     use_context_override=use_ctx
                 )
 
-                if not self.quiet:
+                # 仅当未命中缓存且非静默模式时才打印原文与译文
+                if not self.quiet and not from_cache:
                     print(f"\n--- 第({self.current_index}/{total_paragraphs})段 [{tag_type}] ---")
                     print(f"\n原文:\n{original_text}")
                     print(f"\n译文:\n{translated_text}")
@@ -379,7 +378,6 @@ def main():
         default=None,
         help="输出路径（默认: <输入文件>_translated.epub）",
     )
-    parser.add_argument("-l", "--language", default="zh", help="目标语言")
     parser.add_argument(
         "--api-url", default="http://localhost:1234/v1/chat/completions", help="API地址"
     )
@@ -424,7 +422,6 @@ def main():
 
     translator = EPUBTranslator(
         api_url=args.api_url,
-        target_language=args.language,
         use_context=not args.no_context,
         cache_file=args.cache,
         prompt_suffix=args.prompt_suffix,
