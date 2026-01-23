@@ -41,12 +41,15 @@ class EPUBTranslator:
         delay=0.5,
         input_epub_path=None,
         quiet=False,
+        save_interval=10,  # 定时保存间隔
     ):
         self.api_url = api_url
         self.use_context = use_context
         self.prompt_suffix = prompt_suffix
         self.delay = delay
         self.quiet = quiet
+        self.save_interval = save_interval  # 保存间隔
+        self._cache_write_counter = 0  # 计数器
 
         # 自动生成缓存文件名：输入.epub → 输入.json
         if cache_file is None:
@@ -216,6 +219,12 @@ class EPUBTranslator:
 
             self.translation_cache[cache_key] = cleaned_text
             self._cache_modified = True
+
+            # 定时保存缓存逻辑
+            self._cache_write_counter += 1
+            if self._cache_write_counter >= self.save_interval:
+                self._save_cache()
+                self._cache_write_counter = 0
 
             return cleaned_text, False
 
@@ -430,6 +439,12 @@ def main():
         action="store_true",
         help="静默模式：不显示原文与译文，仅显示进度",
     )
+    parser.add_argument(
+        "--save-interval",
+        type=int,
+        default=10,
+        help="每翻译多少段自动保存一次缓存（默认: 10）",
+    )
 
     args = parser.parse_args()
 
@@ -449,6 +464,7 @@ def main():
         delay=args.delay,
         input_epub_path=args.input_file,
         quiet=args.quiet,
+        save_interval=args.save_interval,
     )
     try:
         translator.translate_epub(args.input_file, args.output)
