@@ -181,18 +181,15 @@ class EPUBTranslator:
         messages = [{"role": "system", "content": system_prompt}]
 
         # ========== 修复后的上下文判断逻辑 ==========
-        # 1. 确定是否启用上下文（优先 override，无则用实例配置）
         enable_context = (
             use_context_override
             if use_context_override is not None
             else self.use_context
         )
-        # 2. 判断是否应该使用上下文（启用上下文 + 有历史上下文）
         should_use_context = (
             enable_context and self.last_original and self.last_translation
         )
 
-        # 3. 直接使用判断结果（无冗余）
         if should_use_context:
             messages.extend(
                 [
@@ -226,7 +223,6 @@ class EPUBTranslator:
             self.translation_cache[cache_key] = cleaned_text
             self._cache_modified = True
 
-            # 定时保存缓存逻辑
             self._cache_write_counter += 1
             if self._cache_write_counter >= self.save_interval:
                 self._save_cache()
@@ -267,7 +263,6 @@ class EPUBTranslator:
                     original_text, tag_type=tag_type, use_context_override=use_ctx
                 )
 
-                # 仅当未命中缓存且非静默模式时才打印原文与译文
                 if not self.quiet and not from_cache:
                     print(
                         f"\n--- 第({self.current_index}/{total_paragraphs})段 [{tag_type}] ---"
@@ -283,7 +278,6 @@ class EPUBTranslator:
                 classes = p.get("class", []) + ["original"]
                 p["class"] = classes
 
-                # ✅ 只有 <p> 才更新上下文历史
                 if is_paragraph:
                     self.last_original = original_text
                     self.last_translation = translated_text
@@ -327,11 +321,9 @@ class EPUBTranslator:
                     if item.get_type() != ebooklib.ITEM_DOCUMENT:
                         continue
 
-                    # ========== 核心修改：处理每个章节前重置上下文 ==========
                     self.last_original = None
                     self.last_translation = None
                     logger.debug(f"处理章节 {item.file_name}，已重置上下文")
-                    # =====================================================
 
                     content = item.get_content()
                     if not content:
@@ -406,20 +398,32 @@ class EPUBTranslator:
             self._save_cache()
 
 
+def load_config(config_path):
+    config_path = Path(config_path)
+    if not config_path.exists():
+        logger.error(f"❌ 配置文件不存在: {config_path}")
+        raise FileNotFoundError(config_path)
+
+    suffix = config_path.suffix.lower()
+    with open(config_path, "r", encoding="utf-8") as f:
+        if suffix == ".json":
+            return json.load(f)
+        else:
+            raise ValueError(f"不支持的配置文件格式: {suffix}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="支持断点续译、保留HTML标签、自定义prompt后缀的EPUB翻译工具"
     )
-    parser.add_argument("input_file", help="输入EPUB路径")
+    parser.add_argument("input_file", nargs="?", help="输入EPUB路径")
     parser.add_argument(
         "-o",
         "--output",
         default=None,
         help="输出路径（默认: <输入文件>_translated.epub）",
     )
-    parser.add_argument(
-        "--api-url", default="http://localhost:1234/v1/chat/completions", help="API地址"
-    )
+    parser.add_argument("--api-url", default=None, help="API地址")
     parser.add_argument(
         "--use-context",
         action="store_true",
@@ -432,13 +436,13 @@ def main():
     )
     parser.add_argument(
         "--prompt-suffix",
-        default="",
+        default=None,
         help="附加到用户 prompt 末尾的字符串（例如 '/no_think'）",
     )
     parser.add_argument(
         "--delay",
         type=float,
-        default=0,
+        default=None,
         help="每段翻译后的延迟（秒），避免 API 过载（默认: 0）",
     )
     parser.add_argument(
@@ -450,11 +454,45 @@ def main():
     parser.add_argument(
         "--save-interval",
         type=int,
-        default=10,
+        default=None,
         help="每翻译多少段自动保存一次缓存（默认: 10）",
     )
+    parser.add_argument(
+        "--config",
+        default=None,
+        help="配置文件路径（JSON）",
+    )
 
+    # 先解析 --config
+    args_partial, _ = parser.parse_known_args()
+
+    # 默认值（与 EPUBTranslator.__init__ 一致）
+    defaults = {
+        "input_file": None,
+        "output": None,
+        "api_url": "http://localhost:1234/v1/chat/completions",
+        "use_context": False,
+        "cache": None,
+        "prompt_suffix": "",
+        "delay": 0.0,
+        "quiet": False,
+        "save_interval": 10,
+    }
+
+    # 从配置文件加载
+    if args_partial.config:
+        config_data = load_config(args_partial.config)
+        for key in defaults:
+            if key in config_data:
+                defaults[key] = config_data[key]
+
+    # 应用默认值
+    parser.set_defaults(**defaults)
     args = parser.parse_args()
+
+    # 检查必要参数
+    if not args.input_file:
+        parser.error("the following arguments are required: input_file")
 
     if not os.path.exists(args.input_file):
         logger.error(f"❌ 输入文件不存在: {args.input_file}")
@@ -485,7 +523,6 @@ def main():
     except Exception as e:
         logger.exception("💥 翻译过程崩溃")
         print(f"\n❌ 翻译失败: {e}")
-        # 可选：崩溃时也保存缓存
         translator._save_cache()
 
 

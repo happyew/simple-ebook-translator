@@ -1,0 +1,8 @@
+{
+  "api_url": "http://localhost:5001/v1/chat/completions",
+  "use_context": true,
+  "prompt_suffix": "/no_think",
+  "delay": 0,
+  "quiet": true,
+  "save_interval": 10
+}
