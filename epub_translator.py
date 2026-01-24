@@ -42,7 +42,8 @@ class EPUBTranslator:
         input_epub_path=None,
         quiet=False,
         save_interval=10,
-        prompt_config=None,  # ← 新增参数
+        prompt_config=None,
+        payload_overrides=None,
     ):
         self.api_url = api_url
         self.use_context = use_context
@@ -51,6 +52,7 @@ class EPUBTranslator:
         self.quiet = quiet
         self.save_interval = save_interval
         self._cache_write_counter = 0
+        self.payload_overrides = payload_overrides or {}
 
         # 自动生成缓存文件名
         if cache_file is None:
@@ -220,15 +222,11 @@ class EPUBTranslator:
         user_content = f"{user_prefix}{text}{self.prompt_suffix}"
         messages.append({"role": "user", "content": user_content})
 
-        payload = {
-            "model": "Qwen3-14B",
-            "messages": messages,
-            "temperature": 0.7,
-            "max_tokens": self._calculate_max_tokens(text),
-            "top_p": 0.8,
-            "top_k": 20,
-            "min_p": 0,
-        }
+        payload = {"model": "Qwen3-14B", "messages": messages}
+        if "max_tokens" not in self.payload_overrides:
+            payload["max_tokens"] = self._calculate_max_tokens(text)
+        payload.update(self.payload_overrides)
+        payload["messages"] = messages
 
         try:
             translated_text = self._call_translation_api(payload)
@@ -474,7 +472,7 @@ def main():
     parser.add_argument(
         "--config",
         default=None,
-        help="配置文件路径（JSON）",
+        help="配置文件路径（JSON），支持字段：prompt_config, payload_overrides 等。",
     )
 
     args_partial, _ = parser.parse_known_args()
@@ -489,7 +487,8 @@ def main():
         "delay": 0.0,
         "quiet": False,
         "save_interval": 10,
-        "prompt_config": None,  # ← 关键新增
+        "prompt_config": None,
+        "payload_overrides": None,
     }
 
     if args_partial.config:
@@ -497,9 +496,10 @@ def main():
         for key in defaults:
             if key in config_data:
                 defaults[key] = config_data[key]
-        # 单独提取 prompt_config（即使它不在 defaults 列表中）
         if "prompt_config" in config_data:
             defaults["prompt_config"] = config_data["prompt_config"]
+        if "payload_overrides" in config_data:
+            defaults["payload_overrides"] = config_data["payload_overrides"]
 
     parser.set_defaults(**defaults)
     args = parser.parse_args()
@@ -525,6 +525,7 @@ def main():
         quiet=args.quiet,
         save_interval=args.save_interval,
         prompt_config=getattr(args, "prompt_config", None),
+        payload_overrides=getattr(args, "payload_overrides", None),
     )
     try:
         translator.translate_epub(args.input_file, args.output)

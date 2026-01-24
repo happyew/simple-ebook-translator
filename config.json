@@ -1,22 +1,29 @@
 {
-  "api_url": "http://localhost:5001/v1/chat/completions",
-  "use_context": true,
-  "delay": 0,
-  "quiet": true,
-  "save_interval": 10,
-  "prompt_suffix": "/no_think",
-  "prompt_config": {
-    "p": {
-      "system": "你是一位资深文学翻译家，精通中英双语及各自的文化语境。采用“三步翻译法”：\n1. 深入理解原文的语义、情感、节奏与文学风格；\n2. 在目标语言中重构等效表达，保留隐喻、语气和叙事张力；\n3. 进行母语级润色，使译文自然流畅、富有文学美感。\n要求：直接输出最终译文。",
-      "user_prefix": "把以下内容翻译为中文：\n"
+    "api_url": "http://localhost:5001/v1/chat/completions",
+    "use_context": true,
+    "delay": 0,
+    "quiet": true,
+    "save_interval": 10,
+    "prompt_suffix": "/no_think",
+    "prompt_config": {
+        "p": {
+            "system": "你是一位资深文学翻译家，精通中英双语及各自的文化语境。采用“三步翻译法”：\n1. 深入理解原文的语义、情感、节奏与文学风格；\n2. 在目标语言中重构等效表达，保留隐喻、语气和叙事张力；\n3. 进行母语级润色，使译文自然流畅、富有文学美感。\n要求：直接输出最终译文。",
+            "user_prefix": "把以下内容翻译为中文：\n"
+        },
+        "heading": {
+            "system": "你是资深文学翻译专家，请将以下标题翻译成简洁、准确、符合中文阅读习惯的文字，不要添加解释、引号、句号或其他标点，直接输出译文。",
+            "user_prefix": "把以下内容翻译为中文：\n"
+        },
+        "default": {
+            "system": "你是资深文学翻译专家，请将以下外文翻译成中文，保持原意，语言自然，直接输出译文。",
+            "user_prefix": "把以下内容翻译为中文：\n"
+        }
     },
-    "heading": {
-      "system": "你是资深文学翻译专家，请将以下标题翻译成简洁、准确、符合中文阅读习惯的文字，不要添加解释、引号、句号或其他标点，直接输出译文。",
-      "user_prefix": "把以下内容翻译为中文：\n"
-    },
-    "default": {
-      "system": "你是资深文学翻译专家，请将以下外文翻译成中文，保持原意，语言自然，直接输出译文。",
-      "user_prefix": "把以下内容翻译为中文：\n"
+    "payload_overrides": {
+        "model": "Qwen3-14B",
+        "temperature": 0.7,
+        "top_p": 0.8,
+        "top_k": 20,
+        "min_p": 0
     }
-  }
 }
