@@ -3,6 +3,7 @@
     "use_context": true,
     "delay": 0,
     "quiet": true,
+    "timeout": 300,
     "save_interval": 10,
     "prompt_suffix": "/no_think",
     "prompt_config": {

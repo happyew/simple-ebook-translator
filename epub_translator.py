@@ -41,6 +41,7 @@ class EPUBTranslator:
         delay=0.5,
         input_epub_path=None,
         quiet=False,
+        timeout=300,
         save_interval=10,
         prompt_config=None,
         payload_overrides=None,
@@ -50,6 +51,7 @@ class EPUBTranslator:
         self.prompt_suffix = prompt_suffix
         self.delay = delay
         self.quiet = quiet
+        self.timeout = timeout
         self.save_interval = save_interval
         self._cache_write_counter = 0
         self.payload_overrides = payload_overrides or {}
@@ -168,7 +170,7 @@ class EPUBTranslator:
         reraise=True,
     )
     def _call_translation_api(self, payload):
-        response = self.session.post(self.api_url, json=payload, timeout=60)
+        response = self.session.post(self.api_url, json=payload, timeout=self.timeout)
         response.raise_for_status()
         data = response.json()
 
@@ -464,6 +466,12 @@ def main():
         help="静默模式：不显示原文与译文，仅显示进度",
     )
     parser.add_argument(
+        "--timeout",
+        type=int,
+        default=None,
+        help="响应超时（默认：300s）",
+    )
+    parser.add_argument(
         "--save-interval",
         type=int,
         default=None,
@@ -486,6 +494,7 @@ def main():
         "prompt_suffix": "",
         "delay": 0.0,
         "quiet": False,
+        "timeout": 300,
         "save_interval": 10,
         "prompt_config": None,
         "payload_overrides": None,
@@ -523,6 +532,7 @@ def main():
         delay=args.delay,
         input_epub_path=args.input_file,
         quiet=args.quiet,
+        timeout=args.timeout,
         save_interval=args.save_interval,
         prompt_config=getattr(args, "prompt_config", None),
         payload_overrides=getattr(args, "payload_overrides", None),
