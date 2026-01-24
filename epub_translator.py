@@ -41,17 +41,18 @@ class EPUBTranslator:
         delay=0.5,
         input_epub_path=None,
         quiet=False,
-        save_interval=10,  # 定时保存间隔
+        save_interval=10,
+        prompt_config=None,  # ← 新增参数
     ):
         self.api_url = api_url
         self.use_context = use_context
         self.prompt_suffix = prompt_suffix
         self.delay = delay
         self.quiet = quiet
-        self.save_interval = save_interval  # 保存间隔
-        self._cache_write_counter = 0  # 计数器
+        self.save_interval = save_interval
+        self._cache_write_counter = 0
 
-        # 自动生成缓存文件名：输入.epub → 输入.json
+        # 自动生成缓存文件名
         if cache_file is None:
             if input_epub_path:
                 self.cache_file = Path(input_epub_path).with_suffix(".json")
@@ -64,19 +65,38 @@ class EPUBTranslator:
         self.session.headers.update(
             {"Content-Type": "application/json", "User-Agent": "EPUBTranslator/1.0"}
         )
-        # 初始化上下文变量（会在每个章节开始时重置）
+
+        # 上下文变量（每章重置）
         self.last_original = None
         self.last_translation = None
 
+        # 加载 prompt 配置
+        self.prompt_config = prompt_config or {}
+        self._default_prompts = {
+            "p": {
+                "system": """你是一位资深文学翻译家，精通中英双语及各自的文化语境。采用“三步翻译法”：
+1. 深入理解原文的语义、情感、节奏与文学风格；
+2. 在目标语言中重构等效表达，保留隐喻、语气和叙事张力；
+3. 进行母语级润色，使译文自然流畅、富有文学美感。
+要求：直接输出最终译文。""",
+                "user_prefix": "把以下内容翻译为中文：\n",
+            },
+            "heading": {
+                "system": "你是资深文学翻译专家，请将以下标题翻译成简洁、准确、符合中文阅读习惯的文字，不要添加解释、引号、句号或其他标点，直接输出译文。",
+                "user_prefix": "把以下内容翻译为中文：\n",
+            },
+            "default": {
+                "system": "你是资深文学翻译专家，请将以下外文翻译成中文，保持原意，语言自然。",
+                "user_prefix": "把以下内容翻译为中文：\n",
+            },
+        }
+
         self.translation_cache = self._load_cache()
         self._cache_modified = False
-
-        # 注册退出时保存缓存
         atexit.register(self._save_cache)
 
     @staticmethod
     def get_local_name(tag):
-        """从带命名空间的标签名中提取本地名，如 '{http://...}p' -> 'p'"""
         if not tag or not hasattr(tag, "name") or not tag.name:
             return None
         name = tag.name
@@ -107,13 +127,37 @@ class EPUBTranslator:
             logger.error(f"❌ 缓存保存失败: {e}")
 
     def _get_cache_key(self, text, tag_type="p"):
-        # 将 tag_type 纳入缓存 key，允许同一文本在不同上下文（p/h）有不同译文
         key_str = f"{tag_type}:{text}"
         return hashlib.md5(key_str.encode("utf-8")).hexdigest()
 
     def clean_think_tags(self, text):
         pattern = r"\<think\>.*?\<\/think\>"
         return re.sub(pattern, "", text, flags=re.DOTALL).strip()
+
+    def _get_prompt(self, tag_type):
+        """
+        根据 tag_type 返回 (system_prompt, user_prefix)
+        """
+        if tag_type == "p":
+            key = "p"
+        elif tag_type.startswith("h") and len(tag_type) <= 3:  # h1 ～ h6
+            key = "heading"
+        else:
+            key = "default"
+
+        if self.prompt_config:
+            custom = self.prompt_config.get(key)
+            if custom:
+                sys_prompt = custom.get("system", self._default_prompts[key]["system"])
+                usr_prefix = custom.get(
+                    "user_prefix", self._default_prompts[key]["user_prefix"]
+                )
+                return sys_prompt, usr_prefix
+
+        return (
+            self._default_prompts[key]["system"],
+            self._default_prompts[key]["user_prefix"],
+        )
 
     @retry(
         stop=stop_after_attempt(3),
@@ -139,48 +183,23 @@ class EPUBTranslator:
         return choice["message"]["content"]
 
     def _calculate_max_tokens(self, text: str) -> int:
-        """根据原文长度动态计算 max_tokens"""
         char_count = len(text)
-
-        # 系数可根据场景调整（此处用 2.0 保安全）
         estimated_tokens = int(char_count * 2.0)
-
-        # 设置合理边界
-        min_tokens = 100  # 避免极短文本分配过少
-        max_tokens = 2000  # 不超过模型输出上限
-
-        return min(max_tokens, max(min_tokens, estimated_tokens))
+        return min(2000, max(100, estimated_tokens))
 
     def translate_text(self, text, tag_type="p", use_context_override=None):
         if not text.strip():
             return "", True
 
         cache_key = self._get_cache_key(text, tag_type)
-
         if cache_key in self.translation_cache:
             logger.debug(f"🔁 命中缓存 ({tag_type}): {text[:30]}...")
             return self.translation_cache[cache_key], True
 
-        # 根据 tag_type 选择 system prompt
-        if tag_type == "p":
-            system_prompt = """你是一位资深文学翻译家，精通中英双语及各自的文化语境。采用“三步翻译法”：
-    1. 深入理解原文的语义、情感、节奏与文学风格；
-    2. 在目标语言中重构等效表达，保留隐喻、语气和叙事张力；
-    3. 进行母语级润色，使译文自然流畅、富有文学美感。
-    要求：直接输出最终译文。"""
-        elif tag_type.startswith("h"):  # h1, h2, ..., h6
-            system_prompt = (
-                "你是资深文学翻译专家，请将以下标题翻译成简洁、准确、符合中文阅读习惯的文字，"
-                "不要添加解释、引号、句号或其他标点，直接输出译文。"
-            )
-        else:
-            system_prompt = (
-                "你是资深文学翻译专家，请将以下外文翻译成中文，保持原意，语言自然。"
-            )
+        system_prompt, user_prefix = self._get_prompt(tag_type)
 
         messages = [{"role": "system", "content": system_prompt}]
 
-        # ========== 修复后的上下文判断逻辑 ==========
         enable_context = (
             use_context_override
             if use_context_override is not None
@@ -197,14 +216,9 @@ class EPUBTranslator:
                     {"role": "assistant", "content": self.last_translation},
                 ]
             )
-        # ===========================================
 
-        messages.append(
-            {
-                "role": "user",
-                "content": f"把以下内容翻译为中文：\n{text}{self.prompt_suffix}",
-            }
-        )
+        user_content = f"{user_prefix}{text}{self.prompt_suffix}"
+        messages.append({"role": "user", "content": user_content})
 
         payload = {
             "model": "Qwen3-14B",
@@ -255,10 +269,10 @@ class EPUBTranslator:
 
             tag_name = self.get_local_name(p).lower() if self.get_local_name(p) else ""
             is_paragraph = tag_name == "p"
-            tag_type = tag_name  # e.g., "p", "h1", "h2", etc.
+            tag_type = tag_name
 
             try:
-                use_ctx = is_paragraph  # 只有 <p> 使用上下文
+                use_ctx = is_paragraph
                 translated_text, from_cache = self.translate_text(
                     original_text, tag_type=tag_type, use_context_override=use_ctx
                 )
@@ -414,7 +428,7 @@ def load_config(config_path):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="支持断点续译、保留HTML标签、自定义prompt后缀的EPUB翻译工具"
+        description="支持断点续译、保留HTML标签、自定义prompt后缀和完整prompt模板的EPUB翻译工具"
     )
     parser.add_argument("input_file", nargs="?", help="输入EPUB路径")
     parser.add_argument(
@@ -463,10 +477,8 @@ def main():
         help="配置文件路径（JSON）",
     )
 
-    # 先解析 --config
     args_partial, _ = parser.parse_known_args()
 
-    # 默认值（与 EPUBTranslator.__init__ 一致）
     defaults = {
         "input_file": None,
         "output": None,
@@ -477,20 +489,21 @@ def main():
         "delay": 0.0,
         "quiet": False,
         "save_interval": 10,
+        "prompt_config": None,  # ← 关键新增
     }
 
-    # 从配置文件加载
     if args_partial.config:
         config_data = load_config(args_partial.config)
         for key in defaults:
             if key in config_data:
                 defaults[key] = config_data[key]
+        # 单独提取 prompt_config（即使它不在 defaults 列表中）
+        if "prompt_config" in config_data:
+            defaults["prompt_config"] = config_data["prompt_config"]
 
-    # 应用默认值
     parser.set_defaults(**defaults)
     args = parser.parse_args()
 
-    # 检查必要参数
     if not args.input_file:
         parser.error("the following arguments are required: input_file")
 
@@ -511,6 +524,7 @@ def main():
         input_epub_path=args.input_file,
         quiet=args.quiet,
         save_interval=args.save_interval,
+        prompt_config=getattr(args, "prompt_config", None),
     )
     try:
         translator.translate_epub(args.input_file, args.output)
