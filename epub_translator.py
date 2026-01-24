@@ -64,6 +64,7 @@ class EPUBTranslator:
         self.session.headers.update(
             {"Content-Type": "application/json", "User-Agent": "EPUBTranslator/1.0"}
         )
+        # 初始化上下文变量（会在每个章节开始时重置）
         self.last_original = None
         self.last_translation = None
 
@@ -162,10 +163,11 @@ class EPUBTranslator:
 
         # 根据 tag_type 选择 system prompt
         if tag_type == "p":
-            system_prompt = (
-                "你是资深文学翻译专家，要求译文保留原文的文学美感和情感基调，"
-                "不得保留任何外语单词，使用优美流畅的中文表达，直接输出译文。"
-            )
+            system_prompt = """你是一位资深文学翻译家，精通中英双语及各自的文化语境。采用“三步翻译法”：
+    1. 深入理解原文的语义、情感、节奏与文学风格；
+    2. 在目标语言中重构等效表达，保留隐喻、语气和叙事张力；
+    3. 进行母语级润色，使译文自然流畅、富有文学美感。
+    要求：直接输出最终译文。"""
         elif tag_type.startswith("h"):  # h1, h2, ..., h6
             system_prompt = (
                 "你是资深文学翻译专家，请将以下标题翻译成简洁、准确、符合中文阅读习惯的文字，"
@@ -178,16 +180,19 @@ class EPUBTranslator:
 
         messages = [{"role": "system", "content": system_prompt}]
 
+        # ========== 修复后的上下文判断逻辑 ==========
+        # 1. 确定是否启用上下文（优先 override，无则用实例配置）
+        enable_context = (
+            use_context_override
+            if use_context_override is not None
+            else self.use_context
+        )
+        # 2. 判断是否应该使用上下文（启用上下文 + 有历史上下文）
         should_use_context = (
-            (
-                use_context_override
-                if use_context_override is not None
-                else self.use_context
-            )
-            and self.last_original
-            and self.last_translation
+            enable_context and self.last_original and self.last_translation
         )
 
+        # 3. 直接使用判断结果（无冗余）
         if should_use_context:
             messages.extend(
                 [
@@ -195,11 +200,12 @@ class EPUBTranslator:
                     {"role": "assistant", "content": self.last_translation},
                 ]
             )
+        # ===========================================
 
         messages.append(
             {
                 "role": "user",
-                "content": f"原文：\n{text}{self.prompt_suffix}",
+                "content": f"把以下内容翻译为中文：\n{text}{self.prompt_suffix}",
             }
         )
 
@@ -210,7 +216,7 @@ class EPUBTranslator:
             "max_tokens": self._calculate_max_tokens(text),
             "top_p": 0.8,
             "top_k": 20,
-            "min_p": 0.0,
+            "min_p": 0,
         }
 
         try:
@@ -321,8 +327,11 @@ class EPUBTranslator:
                     if item.get_type() != ebooklib.ITEM_DOCUMENT:
                         continue
 
+                    # ========== 核心修改：处理每个章节前重置上下文 ==========
                     self.last_original = None
                     self.last_translation = None
+                    logger.debug(f"处理章节 {item.file_name}，已重置上下文")
+                    # =====================================================
 
                     content = item.get_content()
                     if not content:
@@ -412,10 +421,9 @@ def main():
         "--api-url", default="http://localhost:1234/v1/chat/completions", help="API地址"
     )
     parser.add_argument(
-        "--no-context",
-        "-C",
+        "--use-context",
         action="store_true",
-        help="禁用上下文感知翻译",
+        help="启用上下文感知翻译（仅对 <p> 段落生效）",
     )
     parser.add_argument(
         "--cache",
@@ -458,7 +466,7 @@ def main():
 
     translator = EPUBTranslator(
         api_url=args.api_url,
-        use_context=not args.no_context,
+        use_context=args.use_context,
         cache_file=args.cache,
         prompt_suffix=args.prompt_suffix,
         delay=args.delay,
