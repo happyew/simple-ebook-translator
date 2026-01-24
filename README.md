@@ -1,153 +1,122 @@
-# 📘 EPUBTranslator —— 支持断点续译与 `/no_think` 指令的智能 EPUB 翻译工具
+# 📘 EPUBTranslator — 智能文学级 EPUB 翻译工具
 
-> 一款基于大语言模型（LLM）的 EPUB 电子书翻译脚本，支持上下文感知、缓存加速、断点续译，并可启用 `/no_think` 模式以提升翻译效率。
+> 基于本地大模型 API（如 `llama.cpp` / `vLLM` / `Ollama`）的 EPUB 电子书翻译脚本，支持**断点续译**、**上下文感知**、**自定义 Prompt** 和 **双语对照输出**。
 
 ---
 
 ## ✨ 特性
 
-- **双语对照输出**：原文保留并加粗，译文以斜体+左侧边框呈现，清晰易读。
-- **智能缓存机制**：自动缓存已翻译段落，避免重复请求，支持断点续译。
-- **上下文感知翻译**（可选）：利用前一段原文与译文作为上下文，提升连贯性。
-- **`/no_think` 模式支持**：适用于兼容该指令的本地模型（如部分 Ollama/Qwen 部署），跳过推理过程直接输出。
-- **进度可视化**：使用 `tqdm` 显示全局翻译进度。
-- **结构保持完整**：保留原始 EPUB 的章节结构、TOC 目录等元信息。
-- **错误容错**：单段翻译失败不会中断整个流程。
+- ✅ **保留原始 HTML 结构**：仅翻译 `<p>`、`<h1>`–`<h6>` 等文本节点，不破坏排版。
+- 🔁 **断点续译 & 缓存机制**：自动缓存已翻译内容，中断后可继续，避免重复请求。
+- 🧠 **上下文感知翻译**（可选）：对连续段落 `<p>` 启用前文记忆，提升连贯性。
+- 🎯 **按标签类型定制 Prompt**：
+  - 段落 (`<p>`)：使用“三步翻译法”文学级 prompt。
+  - 标题 (`<h1>`–`<h6>`)：简洁准确，无标点。
+  - 其他：通用翻译 prompt。
+- 🛠️ **高度可配置**：
+  - 自定义系统/用户 prompt（通过 JSON 配置文件）
+  - 覆盖 API 请求 payload（如 `temperature`, `model` 等）
+  - 支持添加 prompt 后缀（如 `/no_think`）
+- 📊 **进度可视化**：使用 `tqdm` 显示翻译进度，可选静默模式。
+- 📖 **双语对照输出**：
+  - 原文加粗显示（`.original`）
+  - 译文斜体+左侧边框（`.translation`）
 
 ---
 
-## 🛠️ 依赖环境
-
-- Python 3.8+
-- 必需库：
-  ```bash
-  pip install requests ebooklib beautifulsoup4 tqdm
-  ```
-
-> 注意：`ebooklib` 在某些系统上可能需要额外安装 `lxml`：
-> ```bash
-  pip install lxml
-  ```
-
----
-
-## ⚙️ 使用方法
-
-### 基本用法
+## 📦 安装依赖
 
 ```bash
-python epub_translator.py input_book.epub -o output_book.epub
+pip install -r requirements.txt
 ```
 
-### 完整参数说明
+> ⚠️ 本工具**不包含模型**，需自行部署兼容 OpenAI Chat Completions API 的本地服务（如 [llama.cpp](https://github.com/ggerganov/llama.cpp) + `server`，或 [Ollama](https://ollama.com/)）。
+
+默认连接地址：`http://localhost:1234/v1/chat/completions`
+
+---
+
+## ▶️ 快速使用
+
+### 基础命令
 
 ```bash
-usage: epub_translator.py [-h] [-o OUTPUT] [-l LANGUAGE] [--api-url API_URL]
-                          [--no-context] [--cache CACHE] [--no-think]
-                          input_file
-
-支持断点续译与/no_think开关的EPUB翻译工具
-
-positional arguments:
-  input_file            输入EPUB路径
-
-optional arguments:
-  -h, --help            显示帮助信息并退出
-  -o OUTPUT, --output OUTPUT
-                        输出路径（默认: translated_book.epub）
-  -l LANGUAGE, --language LANGUAGE
-                        目标语言（默认: zh）
-  --api-url API_URL     LLM API 地址（默认: http://localhost:1234/v1/chat/completions）
-  --no-context, -C      禁用上下文感知翻译
-  --cache CACHE         翻译缓存文件路径（默认: translation_cache.json）
-  --no-think            启用 /no_think 后缀（仅适用于支持该指令的模型）
+python epub_translator.py book.epub -o book_zh.epub
 ```
 
-### 示例
-
-#### 1. 使用默认设置翻译（带上下文 + 缓存）
+### 启用上下文感知（推荐用于小说/散文）
 
 ```bash
-python epub_translator.py my_book.epub -o my_book_zh.epub
+python epub_translator.py book.epub --use-context
 ```
 
-#### 2. 启用 `/no_think` 模式（适用于本地 Qwen/Ollama 等）
+### 静默模式（仅显示进度条）
 
 ```bash
-python epub_translator.py book.epub --no-think --api-url http://localhost:5001/v1/chat/completions
+python epub_translator.py book.epub -q
 ```
 
-#### 3. 禁用上下文（更快但可能牺牲连贯性）
+### 自定义 API 地址
 
 ```bash
-python epub_translator.py book.epub -C
+python epub_translator.py book.epub --api-url http://your-server:8000/v1/chat/completions
 ```
 
-#### 4. 自定义缓存文件
+---
+
+## ⚙️ 高级配置（JSON）
+
+创建 `config.json`：
+
+```json
+{
+  "prompt_config": {
+    "p": {
+      "system": "你是一位精通中英文学的翻译家。请将以下英文小说段落译为中文，保留原文的诗意与节奏，语言自然流畅。",
+      "user_prefix": "翻译为中文：\n"
+    },
+    "heading": {
+      "system": "将以下章节标题译为中文，简洁有力，不要加句号。",
+      "user_prefix": "标题翻译：\n"
+    }
+  },
+  "payload_overrides": {
+    "temperature": 0.3,
+    "top_p": 0.9,
+    "model": "Qwen3-14B"
+  },
+  "prompt_suffix": "/no_think",
+  "delay": 0.5,
+  "save_interval": 20
+}
+```
+
+使用配置文件：
 
 ```bash
-python epub_translator.py book.epub --cache my_cache.json
+python epub_translator.py book.epub --config config.json
 ```
 
----
-
-## 🌐 兼容的 LLM 服务
-
-本工具通过标准 OpenAI-style Chat Completions API 调用模型，兼容以下部署方式：
-
-- [Ollama](https://ollama.com/)（配合 `openai-compatible` API）
-- [LM Studio](https://lmstudio.ai/)
-- [OpenRouter](https://openrouter.ai/)
-- 本地部署的 **Qwen3**, **Llama 3**, **DeepSeek** 等（需提供 `/v1/chat/completions` 接口）
-
-> 默认模型为 `Qwen3-14B`，可在代码中修改 `payload["model"]` 以适配其他模型。
+> 所有命令行参数均可在配置文件中设置，命令行优先级更高。
 
 ---
 
-## 💾 缓存机制
+## 📁 输出格式说明
 
-- 所有翻译结果会按 **MD5(原文)** 存入 JSON 缓存文件。
-- 下次运行相同或部分重叠内容时，自动跳过已翻译段落。
-- 缓存每处理 10 段自动保存一次，程序退出时强制保存。
+生成的 EPUB 包含：
 
----
-
-## 📂 输出样式预览
-
-生成的 EPUB 中，每段将呈现为：
-
-```html
-<p class="original">Original English paragraph...</p>
-<p class="translation">优美流畅的中文译文……</p>
-```
-
-配套 CSS 样式确保阅读体验清晰美观。
+- 原文段落：`<p class="original">...</p>`
+- 译文段落：`<p class="translation">...</p>`
+- 内嵌 CSS 样式（位于 `style/trans.css`），实现双语对比排版。
 
 ---
 
-## ⚠️ 注意事项
+## 🛑 注意事项
 
-1. **API 地址必须正确**：确保本地或远程 LLM 服务正在运行且路径匹配。
-2. **模型需支持长文本**：建议使用支持 4K+ 上下文的模型。
-3. **`/no_think` 并非通用**：仅在特定模型（如部分 Qwen 部署）中有效，普通 OpenAI API 会忽略该后缀。
-4. **首次运行较慢**：无缓存时需逐段请求，建议在稳定网络环境下运行。
-5. **EPUB 结构复杂时可能解析异常**：如遇问题可尝试简化源文件或提交 issue。
-
----
-
-## 📜 许可证
-
-MIT License — 自由使用、修改、分发。
+1. **模型要求**：API 必须返回标准 OpenAI 格式（含 `choices[0].message.content`）。
+2. **缓存文件**：默认生成 `<输入文件>.json`，可手动删除以强制重译。
+3. **中文编码**：确保终端支持 UTF-8，避免乱码。
+4. **大文件处理**：建议配合 `--delay 0.5` 防止 API 过载。
+5. **中断恢复**：程序被 `Ctrl+C` 中断时会自动保存缓存。
 
 ---
-
-## 🙌 致谢
-
-- [ebooklib](https://github.com/aerkalov/ebooklib)
-- [BeautifulSoup](https://www.crummy.com/software/BeautifulSoup/)
-- [tqdm](https://github.com/tqdm/tqdm)
-
----
-
-> 📩 如有建议或问题，欢迎提交 Issue 或 PR！  
-> ✉️ 作者：AI 助手（基于 Qwen3） | 更新日期：2026年1月
